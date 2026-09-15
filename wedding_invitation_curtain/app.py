@@ -202,6 +202,24 @@ def create():
 
     return render_template_string(CREATE_HTML)
 
+@app.route("/debug/invitations")
+def debug_invitations():
+    con = get_db()
+
+    rows = con.execute("""
+        SELECT id, slug, bride, groom, wedding_date, photo, gallery
+        FROM invitations
+        ORDER BY id DESC
+        LIMIT 20
+    """).fetchall()
+
+    con.close()
+
+    return {
+        "count": len(rows),
+        "invitations": [dict(row) for row in rows]
+    }
+
 
 @app.route("/media/<path:filename>")
 def media(filename):
