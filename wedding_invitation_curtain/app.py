@@ -201,7 +201,39 @@ def create():
         return redirect(url_for("invite", slug=slug))
 
     return render_template_string(CREATE_HTML)
+@app.route("/fix-final-invitation")
+def fix_final_invitation():
+    con = get_db()
 
+    old = con.execute(
+        "SELECT id FROM invitations WHERE slug = %s",
+        ("imam-muskan",)
+    ).fetchone()
+
+    source = con.execute(
+        "SELECT id FROM invitations WHERE slug = %s",
+        ("imsk",)
+    ).fetchone()
+
+    if not source:
+        con.close()
+        return "Source invitation 'imsk' not found", 404
+
+    if old:
+        con.execute(
+            "DELETE FROM invitations WHERE id = %s",
+            (old["id"],)
+        )
+
+    con.execute(
+        "UPDATE invitations SET slug = %s WHERE id = %s",
+        ("imam-muskan", source["id"])
+    )
+
+    con.commit()
+    con.close()
+
+    return redirect(url_for("invite", slug="imam-muskan"))
 @app.route("/debug/invitations")
 def debug_invitations():
     con = get_db()
