@@ -203,6 +203,54 @@ def create():
     return render_template_string(CREATE_HTML)
 
 
+
+@app.route("/edit/<slug>", methods=["GET", "POST"])
+def edit_invitation(slug):
+    admin_key = os.getenv("ADMIN_KEY", "1234")
+    key = request.args.get("key", "")
+    if key != admin_key:
+        return "Unauthorized", 403
+
+    con = get_db()
+    invitation = con.execute("SELECT * FROM invitations WHERE slug = %s", (slug,)).fetchone()
+    if not invitation:
+        con.close()
+        return "Invitation not found", 404
+
+    if request.method == "POST":
+        photo, music = invitation["photo"], invitation["music"]
+        gallery = [x for x in (invitation["gallery"] or "").split(",") if x]
+        gallery = [x for x in gallery if x not in set(request.form.getlist("remove_gallery"))]
+
+        f = save_uploaded_file(request.files.get("photo"), slug, "cover", IMAGE_EXTENSIONS)
+        if f: photo = f
+        f = save_uploaded_file(request.files.get("music"), slug, "music", AUDIO_EXTENSIONS)
+        if f: music = f
+        for i, item in enumerate(request.files.getlist("gallery")):
+            f = save_uploaded_file(item, slug, f"gallery-new-{i}", IMAGE_EXTENSIONS)
+            if f: gallery.append(f)
+
+        con.execute("""UPDATE invitations SET bride=%s,groom=%s,wedding_date=%s,wedding_time=%s,
+        venue=%s,address=%s,map_url=%s,message=%s,photo=%s,music=%s,gallery=%s,theme=%s,story=%s,
+        event1_name=%s,event1_date=%s,event1_time=%s,event2_name=%s,event2_date=%s,event2_time=%s,
+        event3_name=%s,event3_date=%s,event3_time=%s WHERE slug=%s""", (
+        request.form.get("bride","").strip(),request.form.get("groom","").strip(),
+        request.form.get("wedding_date",""),request.form.get("wedding_time",""),
+        request.form.get("venue",""),request.form.get("address",""),request.form.get("map_url",""),
+        request.form.get("message",""),photo,music,",".join(gallery),request.form.get("theme","rose"),
+        request.form.get("story",""),request.form.get("event1_name",""),request.form.get("event1_date",""),
+        request.form.get("event1_time",""),request.form.get("event2_name",""),request.form.get("event2_date",""),
+        request.form.get("event2_time",""),request.form.get("event3_name",""),request.form.get("event3_date",""),
+        request.form.get("event3_time",""),slug))
+        con.commit(); con.close()
+        return redirect(url_for("edit_invitation", slug=slug, key=key, saved="1"))
+
+    gallery=[x for x in (invitation["gallery"] or "").split(",") if x]
+    con.close()
+    return render_template_string(EDIT_HTML, invitation=invitation, gallery=gallery,
+                                  key=key, saved=request.args.get("saved")=="1")
+
+
 @app.route("/media/<path:filename>")
 def media(filename):
     con=get_db()
@@ -432,6 +480,45 @@ def admin(slug):
         total_guests=total_guests
     )
 
+
+
+EDIT_HTML = r"""
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Edit Invitation</title><style>
+body{margin:0;background:#f5efe4;color:#24342e;font-family:Georgia,serif}.wrap{max-width:900px;margin:25px auto;padding:15px}
+.card{background:#fff;padding:25px;border-radius:20px;box-shadow:0 10px 35px #0001}h1,h2{color:#163f31}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:block;font-weight:bold;margin:10px 0 5px}
+input,textarea,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #d7d0c5;border-radius:9px;font:inherit}
+textarea{min-height:120px}.full{grid-column:1/-1}.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
+.g img{width:100%;height:120px;object-fit:cover;border-radius:8px}.notice{background:#e8f5ec;padding:10px;border-radius:8px}
+button,a.btn{display:inline-block;margin-top:18px;padding:12px 20px;border:0;border-radius:25px;background:#163f31;color:white;text-decoration:none;font-weight:bold}
+a.btn{background:#b58b43}@media(max-width:650px){.grid{grid-template-columns:1fr}}
+</style></head><body><div class="wrap"><div class="card"><h1>Edit Invitation</h1>
+<p>Public link remains <b>/invite/{{ invitation['slug'] }}</b></p>
+{% if saved %}<div class="notice">Changes saved successfully.</div>{% endif %}
+<form method="post" enctype="multipart/form-data" action="{{ url_for('edit_invitation',slug=invitation['slug'],key=key) }}">
+<div class="grid">
+<div><label>Groom</label><input name="groom" value="{{ invitation['groom'] or '' }}"></div>
+<div><label>Bride</label><input name="bride" value="{{ invitation['bride'] or '' }}"></div>
+<div><label>Nikah Date</label><input type="date" name="wedding_date" value="{{ invitation['wedding_date'] or '' }}"></div>
+<div><label>Nikah Time</label><input type="time" name="wedding_time" value="{{ invitation['wedding_time'] or '' }}"></div>
+<div><label>Venue</label><input name="venue" value="{{ invitation['venue'] or '' }}"></div>
+<div><label>Address</label><input name="address" value="{{ invitation['address'] or '' }}"></div>
+<div class="full"><label>Google Maps Link</label><input name="map_url" value="{{ invitation['map_url'] or '' }}"></div>
+<div class="full"><label>Invitation Matter</label><textarea name="message">{{ invitation['message'] or '' }}</textarea></div>
+<div class="full"><label>Our Story</label><textarea name="story">{{ invitation['story'] or '' }}</textarea></div>
+<div><label>Theme</label><select name="theme">{% for t in ['rose','islamicgreen','royal','gold','blue','lavender','peach','emerald','maroon','minimal'] %}<option value="{{t}}" {% if invitation['theme']==t %}selected{% endif %}>{{t|title}}</option>{% endfor %}</select></div>
+<div><label>Replace Cover Photo</label><input type="file" name="photo" accept="image/*"></div>
+<div class="full"><label>Add More Gallery Images</label><input type="file" name="gallery" accept="image/*" multiple></div>
+<div class="full"><label>Replace Music</label><input type="file" name="music" accept="audio/*"></div>
+<div><h2>Event 1 / Nikah</h2><input name="event1_name" value="{{invitation['event1_name'] or ''}}" placeholder="Nikah"><input type="date" name="event1_date" value="{{invitation['event1_date'] or ''}}"><input type="time" name="event1_time" value="{{invitation['event1_time'] or ''}}"></div>
+<div><h2>Event 2 / Reception</h2><input name="event2_name" value="{{invitation['event2_name'] or ''}}" placeholder="Reception"><input type="date" name="event2_date" value="{{invitation['event2_date'] or ''}}"><input type="time" name="event2_time" value="{{invitation['event2_time'] or ''}}"></div>
+<div><h2>Event 3</h2><input name="event3_name" value="{{invitation['event3_name'] or ''}}"><input type="date" name="event3_date" value="{{invitation['event3_date'] or ''}}"><input type="time" name="event3_time" value="{{invitation['event3_time'] or ''}}"></div>
+</div>
+{% if gallery %}<h2>Existing Gallery</h2><p>Tick images to remove:</p><div class="gallery">{% for img in gallery %}<div class="g"><img src="{{url_for('media',filename=img)}}"><label><input style="width:auto" type="checkbox" name="remove_gallery" value="{{img}}"> Remove</label></div>{% endfor %}</div>{% endif %}
+<button type="submit">Save Changes</button> <a class="btn" target="_blank" href="{{url_for('invite',slug=invitation['slug'])}}">View Invitation</a>
+</form></div></div></body></html>
+"""
 
 # -----------------------------
 # HOME PAGE
