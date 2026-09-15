@@ -247,6 +247,38 @@ def invite(slug):
         (slug,)
     ).fetchone()
 
+    if not invitation and slug == "imam-muskan":
+        # Permanent invitation fallback. This survives Render restarts because
+        # the event information is stored in source code, not only in SQLite.
+        con.execute("""
+            INSERT OR IGNORE INTO invitations (
+                slug, bride, groom, wedding_date, wedding_time,
+                venue, address, message, theme, story,
+                event1_name, event1_date, event1_time,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "imam-muskan",
+            "A. Muskan",
+            "M. Imam Hussain",
+            "2026-10-02",
+            "11:00",
+            "GSS Function Hall",
+            "Banaganapalli",
+            "Bismillahir Rahmanir Raheem. With the grace and blessings of Allah (SWT), together with our families, we joyfully invite you to celebrate our Nikah and share in the happiness of this blessed occasion.",
+            "islamicgreen",
+            "Alhamdulillah, by the beautiful decree of Allah, two hearts begin a blessed journey together.",
+            "Reception",
+            "2026-10-03",
+            "13:00",
+            datetime.now().isoformat(timespec="seconds")
+        ))
+        con.commit()
+        invitation = con.execute(
+            "SELECT * FROM invitations WHERE slug = ?",
+            (slug,)
+        ).fetchone()
+
     if not invitation:
         con.close()
         return "Invitation not found", 404
