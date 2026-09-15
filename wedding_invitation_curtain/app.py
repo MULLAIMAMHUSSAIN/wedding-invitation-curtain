@@ -1,12 +1,14 @@
 
 import os
 import re
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, request, redirect, url_for, render_template_string, flash
+from flask import Flask, request, redirect, url_for, render_template_string, flash, Response
 from werkzeug.utils import secure_filename
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.errors import UniqueViolation
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "static" / "uploads"
@@ -23,80 +25,39 @@ AUDIO_EXTENSIONS = {"mp3", "wav", "ogg", "m4a"}
 
 
 # -----------------------------
-# DATABASE
+# DATABASE — PostgreSQL
 # -----------------------------
 def get_db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def add_column_if_missing(con, table, column_name, column_def):
-    cols = [r["name"] for r in con.execute(f"PRAGMA table_info({table})").fetchall()]
-    if column_name not in cols:
-        con.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
-
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL is not configured in Render.")
+    return psycopg.connect(url, row_factory=dict_row)
 
 def init_db():
-    con = get_db()
-
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS invitations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        slug TEXT UNIQUE NOT NULL,
-        bride TEXT NOT NULL,
-        groom TEXT NOT NULL,
-        wedding_date TEXT NOT NULL,
-        wedding_time TEXT,
-        venue TEXT,
-        address TEXT,
-        map_url TEXT,
-        message TEXT,
-        photo TEXT,
-        event1_name TEXT,
-        event1_date TEXT,
-        event1_time TEXT,
-        event2_name TEXT,
-        event2_date TEXT,
-        event2_time TEXT,
-        created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS rsvps (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invitation_id INTEGER NOT NULL,
-        guest_name TEXT NOT NULL,
-        attendance TEXT NOT NULL,
-        guest_count INTEGER DEFAULT 1,
-        message TEXT,
-        created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wishes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invitation_id INTEGER NOT NULL,
-        guest_name TEXT NOT NULL,
-        wish TEXT NOT NULL,
-        created_at TEXT NOT NULL
-    );
-    """)
-
-    extra_columns = [
-        ("music", "TEXT"),
-        ("gallery", "TEXT"),
-        ("theme", "TEXT DEFAULT 'rose'"),
-        ("story", "TEXT"),
-        ("event3_name", "TEXT"),
-        ("event3_date", "TEXT"),
-        ("event3_time", "TEXT"),
-    ]
-
-    for name, definition in extra_columns:
-        add_column_if_missing(con, "invitations", name, definition)
-
-    con.commit()
+    con=get_db()
+    with con:
+        with con.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS invitations (
+              id BIGSERIAL PRIMARY KEY, slug TEXT UNIQUE NOT NULL,
+              bride TEXT NOT NULL, groom TEXT NOT NULL, wedding_date TEXT NOT NULL,
+              wedding_time TEXT, venue TEXT, address TEXT, map_url TEXT, message TEXT,
+              photo TEXT, event1_name TEXT, event1_date TEXT, event1_time TEXT,
+              event2_name TEXT, event2_date TEXT, event2_time TEXT, created_at TEXT NOT NULL,
+              music TEXT, gallery TEXT, theme TEXT DEFAULT 'rose', story TEXT,
+              event3_name TEXT, event3_date TEXT, event3_time TEXT)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS rsvps (
+              id BIGSERIAL PRIMARY KEY,
+              invitation_id BIGINT NOT NULL REFERENCES invitations(id) ON DELETE CASCADE,
+              guest_name TEXT NOT NULL, attendance TEXT NOT NULL, guest_count INTEGER DEFAULT 1,
+              message TEXT, created_at TEXT NOT NULL)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS wishes (
+              id BIGSERIAL PRIMARY KEY,
+              invitation_id BIGINT NOT NULL REFERENCES invitations(id) ON DELETE CASCADE,
+              guest_name TEXT NOT NULL, wish TEXT NOT NULL, created_at TEXT NOT NULL)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS media (
+              filename TEXT PRIMARY KEY, content_type TEXT NOT NULL,
+              data BYTEA NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
     con.close()
-
 
 # -----------------------------
 # HELPERS
@@ -112,15 +73,19 @@ def allowed_file(filename, allowed):
 
 
 def save_uploaded_file(file_obj, slug, prefix, allowed):
-    if not file_obj or not file_obj.filename:
+    if not file_obj or not file_obj.filename or not allowed_file(file_obj.filename, allowed):
         return None
-
-    if not allowed_file(file_obj.filename, allowed):
-        return None
-
-    ext = secure_filename(file_obj.filename).rsplit(".", 1)[1].lower()
-    filename = f"{slug}-{prefix}-{int(datetime.now().timestamp()*1000)}.{ext}"
-    file_obj.save(UPLOAD_DIR / filename)
+    ext=secure_filename(file_obj.filename).rsplit(".",1)[1].lower()
+    filename=f"{slug}-{prefix}-{int(datetime.now().timestamp()*1000)}.{ext}"
+    data=file_obj.read()
+    con=get_db()
+    with con:
+        con.execute("""INSERT INTO media(filename,content_type,data)
+                       VALUES (%s,%s,%s)
+                       ON CONFLICT(filename) DO UPDATE
+                       SET content_type=EXCLUDED.content_type,data=EXCLUDED.data""",
+                    (filename,file_obj.mimetype or "application/octet-stream",data))
+    con.close()
     return filename
 
 
@@ -196,7 +161,7 @@ def create():
                     event3_name, event3_date, event3_time,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 slug,
                 bride,
@@ -226,7 +191,7 @@ def create():
 
             con.commit()
 
-        except sqlite3.IntegrityError:
+        except UniqueViolation:
             con.close()
             flash("That custom invitation link already exists. Choose another.")
             return redirect(url_for("create"))
@@ -238,12 +203,21 @@ def create():
     return render_template_string(CREATE_HTML)
 
 
+@app.route("/media/<path:filename>")
+def media(filename):
+    con=get_db()
+    row=con.execute("SELECT content_type,data FROM media WHERE filename = %s",(filename,)).fetchone()
+    con.close()
+    if not row:
+        return "Media not found",404
+    return Response(bytes(row["data"]),mimetype=row["content_type"])
+
 @app.route("/invite/<slug>")
 def invite(slug):
     con = get_db()
 
     invitation = con.execute(
-        "SELECT * FROM invitations WHERE slug = ?",
+        "SELECT * FROM invitations WHERE slug = %s",
         (slug,)
     ).fetchone()
 
@@ -251,12 +225,13 @@ def invite(slug):
         # Permanent invitation fallback. This survives Render restarts because
         # the event information is stored in source code, not only in SQLite.
         con.execute("""
-            INSERT OR IGNORE INTO invitations (
+            INSERT INTO invitations (
                 slug, bride, groom, wedding_date, wedding_time,
                 venue, address, message, theme, story,
                 event1_name, event1_date, event1_time,
                 created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (slug) DO NOTHING
         """, (
             "imam-muskan",
             "A. Muskan",
@@ -275,7 +250,7 @@ def invite(slug):
         ))
         con.commit()
         invitation = con.execute(
-            "SELECT * FROM invitations WHERE slug = ?",
+            "SELECT * FROM invitations WHERE slug = %s",
             (slug,)
         ).fetchone()
 
@@ -285,7 +260,7 @@ def invite(slug):
 
     wishes = con.execute("""
         SELECT * FROM wishes
-        WHERE invitation_id = ?
+        WHERE invitation_id = %s
         ORDER BY id DESC
         LIMIT 12
     """, (invitation["id"],)).fetchall()
@@ -310,7 +285,7 @@ def rsvp(slug):
     con = get_db()
 
     invitation = con.execute(
-        "SELECT * FROM invitations WHERE slug = ?",
+        "SELECT * FROM invitations WHERE slug = %s",
         (slug,)
     ).fetchone()
 
@@ -340,7 +315,7 @@ def rsvp(slug):
                 message,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             invitation["id"],
             guest_name,
@@ -362,7 +337,7 @@ def wish(slug):
     con = get_db()
 
     invitation = con.execute(
-        "SELECT * FROM invitations WHERE slug = ?",
+        "SELECT * FROM invitations WHERE slug = %s",
         (slug,)
     ).fetchone()
 
@@ -381,7 +356,7 @@ def wish(slug):
                 wish,
                 created_at
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         """, (
             invitation["id"],
             guest_name,
@@ -415,7 +390,7 @@ def admin(slug):
     con = get_db()
 
     invitation = con.execute(
-        "SELECT * FROM invitations WHERE slug = ?",
+        "SELECT * FROM invitations WHERE slug = %s",
         (slug,)
     ).fetchone()
 
@@ -425,13 +400,13 @@ def admin(slug):
 
     responses = con.execute("""
         SELECT * FROM rsvps
-        WHERE invitation_id = ?
+        WHERE invitation_id = %s
         ORDER BY id DESC
     """, (invitation["id"],)).fetchall()
 
     wishes = con.execute("""
         SELECT * FROM wishes
-        WHERE invitation_id = ?
+        WHERE invitation_id = %s
         ORDER BY id DESC
     """, (invitation["id"],)).fetchall()
 
@@ -2022,7 +1997,7 @@ loop
 >
 
 <source
-src="{{ url_for('static', filename='uploads/' + invitation['music']) }}">
+src="{{ url_for('media', filename=invitation['music']) }}">
 
 </audio>
 
@@ -2084,7 +2059,7 @@ Together with our families
 
 <img
 class="cover"
-src="{{ url_for('static', filename='uploads/' + invitation['photo']) }}"
+src="{{ url_for('media', filename=invitation['photo']) }}"
 alt="Wedding photo"
 >
 
@@ -2493,7 +2468,7 @@ Our Gallery
 {% for img in gallery %}
 
 <img
-src="{{ url_for('static', filename='uploads/' + img) }}"
+src="{{ url_for('media', filename=img) }}"
 loading="lazy"
 alt="Wedding gallery"
 >

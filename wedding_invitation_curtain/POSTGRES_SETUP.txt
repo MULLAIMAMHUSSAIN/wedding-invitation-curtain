@@ -1,0 +1,11 @@
+RENDER SETUP
+1. Create a Render PostgreSQL database.
+2. In the web service Environment page add:
+   DATABASE_URL = <PostgreSQL Internal Database URL>
+3. Root Directory: wedding_invitation_curtain
+4. Build: pip install -r requirements.txt
+5. Start: gunicorn app:app
+6. Deploy latest commit.
+7. Open /create, fill invitation, save, then share /invite/<slug>.
+
+This version stores invitations, RSVP, wishes, couple photo, gallery images and music in PostgreSQL.
